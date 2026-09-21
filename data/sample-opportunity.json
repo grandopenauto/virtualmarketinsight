@@ -1,0 +1,8 @@
+{
+  "illustrative": true,
+  "title": "Pallet Manufacturing Opportunity",
+  "capital_requirement": 500000,
+  "requirements": ["equipment", "lumber supply", "property", "labor", "buyers", "logistics"],
+  "candidate_counts": {"equipment": 3, "supplier_routes": 4, "prospective_buyers": 11},
+  "note": "Illustrative UI seed only; not a live opportunity record."
+}
