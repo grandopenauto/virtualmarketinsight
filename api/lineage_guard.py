@@ -96,6 +96,36 @@ def assert_execution_review_manifest_current(manifest_id: str) -> dict[str, Any]
     return dict(manifest)
 
 
+def assert_dispatch_ticket_current(dispatch_ticket_id: str) -> dict[str, Any]:
+    with _connect() as conn:
+        ticket = conn.execute(
+            """
+            SELECT dispatch_ticket_id,execution_authorization_id,manifest_id,
+                   action_packet_id,state,sequence
+            FROM dispatch_tickets
+            WHERE dispatch_ticket_id = ?
+            LIMIT 1
+            """,
+            (dispatch_ticket_id,),
+        ).fetchone()
+        if not ticket:
+            raise KeyError("dispatch_ticket_not_found")
+        latest = conn.execute(
+            """
+            SELECT dispatch_ticket_id,execution_authorization_id,sequence
+            FROM dispatch_tickets
+            WHERE execution_authorization_id = ?
+            ORDER BY sequence DESC
+            LIMIT 1
+            """,
+            (ticket["execution_authorization_id"],),
+        ).fetchone()
+        if not latest or latest["dispatch_ticket_id"] != dispatch_ticket_id:
+            raise ValueError("dispatch_ticket_is_not_latest_for_execution_authorization")
+    assert_execution_review_manifest_current(str(ticket["manifest_id"]))
+    return dict(ticket)
+
+
 def inspect_action_packet_freshness(action_packet_id: str) -> dict[str, Any]:
     try:
         packet = assert_action_packet_current(action_packet_id)
@@ -128,5 +158,23 @@ def inspect_execution_review_manifest_freshness(manifest_id: str) -> dict[str, A
         return {
             "current": False,
             "manifest_id": manifest_id,
+            "reason": str(exc),
+        }
+
+
+def inspect_dispatch_ticket_freshness(dispatch_ticket_id: str) -> dict[str, Any]:
+    try:
+        ticket = assert_dispatch_ticket_current(dispatch_ticket_id)
+        return {
+            "current": True,
+            "dispatch_ticket_id": dispatch_ticket_id,
+            "execution_authorization_id": ticket["execution_authorization_id"],
+            "manifest_id": ticket["manifest_id"],
+            "reason": None,
+        }
+    except (KeyError, ValueError) as exc:
+        return {
+            "current": False,
+            "dispatch_ticket_id": dispatch_ticket_id,
             "reason": str(exc),
         }
