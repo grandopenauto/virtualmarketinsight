@@ -9,10 +9,11 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import api.app as base
+from api.decision_packet import build_decision_packet
 
-# Runtime augmentation of the proven v0.4 gateway. Keeping this layer small makes
-# the Business Analyst adapter independently reversible while its contract matures.
-base.VERSION = "0.5.0"
+# Runtime augmentation of the proven gateway. Keeping this layer small makes
+# read adapters and decision packets independently reversible as contracts mature.
+base.VERSION = "0.6.0"
 app = base.app
 
 BA_READ_PROXY_URL = os.getenv(
@@ -53,8 +54,6 @@ for item in base.CAPABILITY_REGISTRY:
         item["integration_state"] = "read-adapter-live"
         item["authority"] = "loopback-only read adapter"
 
-# Add the sidecar to the operator health mesh. Its address remains private because
-# HEALTH_TARGETS is never returned by the public capability registry.
 if not any(item.get("id") == "business-analyst-vmi-read" for item in base.HEALTH_TARGETS):
     base.HEALTH_TARGETS.append(
         {
@@ -130,13 +129,7 @@ def _ba_reads_for_surface(surface: str) -> list[dict[str, Any]]:
 
 
 def _build_operator_brief(request: base.EvidenceRequest) -> dict[str, Any]:
-    """Build the operator packet after authorization has already been decided.
-
-    Keeping packet construction separate from HTTP authentication lets deployment
-    tests exercise routing/evidence behavior without importing service-only secrets
-    into a standalone process. Public callers still go through operator_brief_v05,
-    which performs the operator-key gate first.
-    """
+    """Build the operator packet after authorization has already been decided."""
     route, oie_evidence = base._operator_evidence(request)
     native_reads = _ba_reads_for_surface(route["resolved_surface"])
     sidecar = _sidecar_health()
@@ -163,7 +156,12 @@ def _build_operator_brief(request: base.EvidenceRequest) -> dict[str, Any]:
     }
 
 
-# Replace the v0.4 operator brief while leaving every other route unchanged.
+def _build_decision_packet(request: base.EvidenceRequest) -> dict[str, Any]:
+    brief = _build_operator_brief(request)
+    return build_decision_packet(request, brief)
+
+
+# Replace the base operator brief while leaving every other route unchanged.
 app.router.routes[:] = [
     route
     for route in app.router.routes
@@ -175,12 +173,47 @@ app.router.routes[:] = [
 
 
 @app.post("/api/v1/operator/brief")
-def operator_brief_v05(
+def operator_brief_v06(
     request: base.EvidenceRequest,
     x_vmi_operator_key: str | None = base.Header(default=None),
 ) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return _build_operator_brief(request)
+
+
+@app.post("/api/v1/operator/decision-packet")
+def operator_decision_packet_v1(
+    request: base.EvidenceRequest,
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return _build_decision_packet(request)
+
+
+@app.get("/api/v1/operator/decision-packet/schema")
+def operator_decision_packet_schema(
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return {
+        "schema": "vmi.decision-packet.v1",
+        "purpose": "Package routed intent, evidence, capability readiness, gaps and approval gates for human review.",
+        "external_execution_permitted": False,
+        "external_actions_executed": 0,
+        "required_sections": [
+            "intent",
+            "execution_graph",
+            "capability_plan",
+            "capability_health",
+            "evidence",
+            "evidence_summary",
+            "gaps",
+            "authority",
+            "approval_gates",
+            "review_options",
+            "next_gate",
+        ],
+    }
 
 
 @app.get("/api/v1/operator/native/read-plan")
