@@ -78,6 +78,24 @@ def assert_action_packet_current(action_packet_id: str) -> dict[str, Any]:
     return dict(packet)
 
 
+def assert_execution_review_manifest_current(manifest_id: str) -> dict[str, Any]:
+    with _connect() as conn:
+        manifest = conn.execute(
+            "SELECT manifest_id, authorization_id, action_packet_id, state, sequence FROM execution_review_manifests WHERE manifest_id = ? LIMIT 1",
+            (manifest_id,),
+        ).fetchone()
+        if not manifest:
+            raise KeyError("execution_review_manifest_not_found")
+        latest = conn.execute(
+            "SELECT manifest_id, action_packet_id, sequence FROM execution_review_manifests WHERE action_packet_id = ? ORDER BY sequence DESC LIMIT 1",
+            (manifest["action_packet_id"],),
+        ).fetchone()
+        if not latest or latest["manifest_id"] != manifest_id:
+            raise ValueError("execution_review_manifest_is_not_latest_for_action_packet")
+    assert_action_packet_current(str(manifest["action_packet_id"]))
+    return dict(manifest)
+
+
 def inspect_action_packet_freshness(action_packet_id: str) -> dict[str, Any]:
     try:
         packet = assert_action_packet_current(action_packet_id)
@@ -92,5 +110,23 @@ def inspect_action_packet_freshness(action_packet_id: str) -> dict[str, Any]:
         return {
             "current": False,
             "action_packet_id": action_packet_id,
+            "reason": str(exc),
+        }
+
+
+def inspect_execution_review_manifest_freshness(manifest_id: str) -> dict[str, Any]:
+    try:
+        manifest = assert_execution_review_manifest_current(manifest_id)
+        return {
+            "current": True,
+            "manifest_id": manifest_id,
+            "action_packet_id": manifest["action_packet_id"],
+            "authorization_id": manifest["authorization_id"],
+            "reason": None,
+        }
+    except (KeyError, ValueError) as exc:
+        return {
+            "current": False,
+            "manifest_id": manifest_id,
             "reason": str(exc),
         }
