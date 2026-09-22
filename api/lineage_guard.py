@@ -68,6 +68,12 @@ def assert_action_packet_current(action_packet_id: str) -> dict[str, Any]:
         ).fetchone()
         if not packet:
             raise KeyError("bounded_action_packet_not_found")
+        latest = conn.execute(
+            "SELECT action_packet_id, event_id, sequence FROM bounded_action_packets WHERE event_id = ? ORDER BY sequence DESC LIMIT 1",
+            (packet["event_id"],),
+        ).fetchone()
+        if not latest or latest["action_packet_id"] != action_packet_id:
+            raise ValueError("bounded_action_packet_is_not_latest_for_review_event")
     assert_review_event_current(packet["event_id"])
     return dict(packet)
 
