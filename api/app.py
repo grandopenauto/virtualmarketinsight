@@ -14,10 +14,13 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 ENV = os.getenv("VMI_ENV", "development")
 OPERATOR_KEY = os.getenv("VMI_OPERATOR_KEY", "")
 OIE_BASE_URL = os.getenv("VMI_OIE_URL", "http://127.0.0.1:3197").rstrip("/")
+BUSINESS_ANALYST_BASE_URL = os.getenv("VMI_BUSINESS_ANALYST_URL", "http://127.0.0.1:3194").rstrip("/")
+LINKSTREAM_BASE_URL = os.getenv("VMI_LINKSTREAM_URL", "http://127.0.0.1:3181").rstrip("/")
+OPPORTUNITY_EXPLORER_BASE_URL = os.getenv("VMI_OPPORTUNITY_EXPLORER_URL", "http://127.0.0.1:3297").rstrip("/")
 
 app = FastAPI(
     title="VirtualMarketInsight Gateway",
@@ -179,22 +182,22 @@ CAPABILITY_REGISTRY: list[dict[str, Any]] = [
     {
         "id": "business-analyst",
         "label": "Business Analyst",
-        "surfaces": ["analyst", "opportunities", "operational-capital"],
-        "integration_state": "contract-review",
-        "authority": "read-only candidate",
+        "surfaces": ["analyst", "opportunities", "operational-capital", "agents"],
+        "integration_state": "protected-read-ready",
+        "authority": "protected internal read contract",
     },
     {
         "id": "linkstream",
         "label": "LinkStream",
         "surfaces": ["markets", "analyst", "agents"],
-        "integration_state": "contract-review",
-        "authority": "read-only candidate",
+        "integration_state": "protected-read-ready",
+        "authority": "protected internal read contract",
     },
     {
         "id": "opportunity-explorer",
         "label": "Opportunity Explorer",
         "surfaces": ["opportunities"],
-        "integration_state": "contract-review",
+        "integration_state": "health-live-contract-pending",
         "authority": "read-only candidate",
     },
     {
@@ -240,6 +243,33 @@ SURFACE_EVIDENCE_PLAN: dict[str, list[str]] = {
     "operational-capital": ["demand_status", "capabilities", "opportunities"],
     "agents": ["integration_status", "capabilities"],
 }
+
+HEALTH_TARGETS: list[dict[str, str]] = [
+    {
+        "id": "opportunity-intelligence",
+        "label": "Opportunity Intelligence Engine",
+        "base": OIE_BASE_URL,
+        "path": "/health",
+    },
+    {
+        "id": "business-analyst",
+        "label": "Business Analyst",
+        "base": BUSINESS_ANALYST_BASE_URL,
+        "path": "/health",
+    },
+    {
+        "id": "linkstream",
+        "label": "LinkStream",
+        "base": LINKSTREAM_BASE_URL,
+        "path": "/api/health",
+    },
+    {
+        "id": "opportunity-explorer",
+        "label": "Opportunity Explorer",
+        "base": OPPORTUNITY_EXPLORER_BASE_URL,
+        "path": "/health",
+    },
+]
 
 
 class RouteRequest(BaseModel):
@@ -324,6 +354,22 @@ def _compact(value: Any, depth: int = 0) -> Any:
     return value
 
 
+def _json_get(base: str, path: str, params: dict[str, Any] | None = None, timeout: int = 4) -> dict[str, Any]:
+    url = f"{base}{path}"
+    if params:
+        url += "?" + urlencode(params)
+    req = Request(url, headers={"Accept": "application/json", "User-Agent": f"VMI-Gateway/{VERSION}"})
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            raw = response.read(512_000)
+            payload = json.loads(raw.decode("utf-8"))
+            return {"ok": True, "status": response.status, "data": payload}
+    except HTTPError as exc:
+        return {"ok": False, "status": exc.code, "error": "upstream_http_error"}
+    except (URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return {"ok": False, "error": type(exc).__name__}
+
+
 def _oie_get(operation: str, limit: int) -> dict[str, Any]:
     spec = OIE_OPERATIONS.get(operation)
     if not spec:
@@ -333,25 +379,61 @@ def _oie_get(operation: str, limit: int) -> dict[str, Any]:
     if spec["limit"]:
         params["limit"] = min(max(limit, 1), 25)
 
-    url = f"{OIE_BASE_URL}{spec['path']}"
-    if params:
-        url += "?" + urlencode(params)
+    result = _json_get(OIE_BASE_URL, spec["path"], params=params)
+    if result.get("ok"):
+        return {
+            "operation": operation,
+            "ok": True,
+            "status": result.get("status"),
+            "data": _compact(result.get("data")),
+        }
+    return {"operation": operation, **result}
 
-    req = Request(url, headers={"Accept": "application/json", "User-Agent": "VMI-Gateway/0.3"})
-    try:
-        with urlopen(req, timeout=4) as response:
-            raw = response.read(512_000)
-            payload = json.loads(raw.decode("utf-8"))
-            return {
-                "operation": operation,
-                "ok": True,
-                "status": response.status,
-                "data": _compact(payload),
-            }
-    except HTTPError as exc:
-        return {"operation": operation, "ok": False, "status": exc.code, "error": "upstream_http_error"}
-    except (URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return {"operation": operation, "ok": False, "error": type(exc).__name__}
+
+def _capability_health() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    safety_fields = [
+        "external_writes_enabled",
+        "integration_execution_enabled",
+        "externalFetchEnabled",
+        "externalDispatchEnabled",
+        "operating_mode",
+        "role",
+    ]
+    for target in HEALTH_TARGETS:
+        result = _json_get(target["base"], target["path"], timeout=3)
+        if result.get("ok"):
+            data = result.get("data") or {}
+            safety = {key: data[key] for key in safety_fields if key in data}
+            items.append(
+                {
+                    "id": target["id"],
+                    "label": target["label"],
+                    "reachable": True,
+                    "status": result.get("status"),
+                    "service": data.get("service") or data.get("name") or target["label"],
+                    "version": data.get("version"),
+                    "safety": safety,
+                }
+            )
+        else:
+            items.append(
+                {
+                    "id": target["id"],
+                    "label": target["label"],
+                    "reachable": False,
+                    "status": result.get("status"),
+                    "error": result.get("error", "unreachable"),
+                }
+            )
+    return items
+
+
+def _operator_evidence(request: EvidenceRequest) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    route = _resolve_route(request)
+    operations = SURFACE_EVIDENCE_PLAN[route["resolved_surface"]]
+    evidence = [_oie_get(operation, request.limit) for operation in operations]
+    return route, evidence
 
 
 @app.get("/")
@@ -361,6 +443,7 @@ def root() -> dict[str, Any]:
         "version": VERSION,
         "routing": "live",
         "evidence_adapters": "gated",
+        "capability_health": "gated",
         "execution": "gated",
     }
 
@@ -413,15 +496,28 @@ def resolve_router(request: RouteRequest) -> dict[str, Any]:
     return _resolve_route(request)
 
 
+@app.get("/api/v1/operator/capabilities/health")
+def operator_capability_health(
+    x_vmi_operator_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_operator_key(x_vmi_operator_key)
+    items = _capability_health()
+    return {
+        "items": items,
+        "reachable_count": sum(1 for item in items if item["reachable"]),
+        "count": len(items),
+        "external_actions_executed": 0,
+        "execution_state": "health_read_only",
+    }
+
+
 @app.post("/api/v1/operator/evidence/preview")
 def operator_evidence_preview(
     request: EvidenceRequest,
     x_vmi_operator_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_operator_key(x_vmi_operator_key)
-    route = _resolve_route(request)
-    operations = SURFACE_EVIDENCE_PLAN[route["resolved_surface"]]
-    evidence = [_oie_get(operation, request.limit) for operation in operations]
+    route, evidence = _operator_evidence(request)
     return {
         "request_id": route["request_id"],
         "resolved_surface": route["resolved_surface"],
@@ -432,6 +528,29 @@ def operator_evidence_preview(
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "external_actions_executed": 0,
         "execution_state": "evidence_gathering_only",
+    }
+
+
+@app.post("/api/v1/operator/brief")
+def operator_brief(
+    request: EvidenceRequest,
+    x_vmi_operator_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_operator_key(x_vmi_operator_key)
+    route, evidence = _operator_evidence(request)
+    return {
+        "request_id": route["request_id"],
+        "route": route,
+        "capability_health": _capability_health(),
+        "evidence": {
+            "adapter": "opportunity-intelligence",
+            "authority": "read-only",
+            "items": evidence,
+        },
+        "prepared_at": datetime.now(timezone.utc).isoformat(),
+        "external_actions_executed": 0,
+        "execution_state": "operator_brief_only",
+        "next_gate": "Human review before any external or execution action.",
     }
 
 
