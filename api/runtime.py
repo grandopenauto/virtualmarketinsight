@@ -9,20 +9,18 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import api.app as base
+from api.approval_envelope import ApprovalEnvelopeInput, build_approval_envelope
 from api.decision_packet import build_decision_packet
 
 # Runtime augmentation of the proven gateway. Keeping this layer small makes
-# read adapters and decision packets independently reversible as contracts mature.
-base.VERSION = "0.6.0"
+# read adapters, decision packets and approval preparation independently reversible.
+base.VERSION = "0.7.0"
 app = base.app
 
 BA_READ_PROXY_URL = os.getenv(
     "VMI_BA_READ_PROXY_URL", "http://127.0.0.1:3193"
 ).rstrip("/")
 
-# VMI callers never supply an arbitrary Business Analyst path. These exact named
-# surfaces are already allow-listed by the loopback sidecar and Business Analyst's
-# native adapter layer.
 BA_READ_PLAN: dict[str, list[tuple[str, str]]] = {
     "markets": [
         ("seoagent", "operations"),
@@ -63,6 +61,10 @@ if not any(item.get("id") == "business-analyst-vmi-read" for item in base.HEALTH
             "path": "/health",
         }
     )
+
+
+class ApprovalEnvelopeRequest(base.EvidenceRequest):
+    approval: ApprovalEnvelopeInput
 
 
 def _sidecar_health() -> dict[str, Any]:
@@ -129,7 +131,6 @@ def _ba_reads_for_surface(surface: str) -> list[dict[str, Any]]:
 
 
 def _build_operator_brief(request: base.EvidenceRequest) -> dict[str, Any]:
-    """Build the operator packet after authorization has already been decided."""
     route, oie_evidence = base._operator_evidence(request)
     native_reads = _ba_reads_for_surface(route["resolved_surface"])
     sidecar = _sidecar_health()
@@ -161,7 +162,11 @@ def _build_decision_packet(request: base.EvidenceRequest) -> dict[str, Any]:
     return build_decision_packet(request, brief)
 
 
-# Replace the base operator brief while leaving every other route unchanged.
+def _build_approval_envelope(request: ApprovalEnvelopeRequest) -> dict[str, Any]:
+    packet = _build_decision_packet(request)
+    return build_approval_envelope(packet, request.approval)
+
+
 app.router.routes[:] = [
     route
     for route in app.router.routes
@@ -173,7 +178,7 @@ app.router.routes[:] = [
 
 
 @app.post("/api/v1/operator/brief")
-def operator_brief_v06(
+def operator_brief_v07(
     request: base.EvidenceRequest,
     x_vmi_operator_key: str | None = base.Header(default=None),
 ) -> dict[str, Any]:
@@ -213,6 +218,36 @@ def operator_decision_packet_schema(
             "review_options",
             "next_gate",
         ],
+    }
+
+
+@app.post("/api/v1/operator/approval-envelope/prepare")
+def operator_prepare_approval_envelope(
+    request: ApprovalEnvelopeRequest,
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return _build_approval_envelope(request)
+
+
+@app.get("/api/v1/operator/approval-envelope/schema")
+def operator_approval_envelope_schema(
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return {
+        "schema": "vmi.approval-envelope.v1",
+        "purpose": "Prepare a bounded human-approval request from a Decision Packet without recording approval or executing anything.",
+        "review_actions": [
+            "request_more_evidence",
+            "resolve_capability_gap",
+            "prepare_bounded_action",
+            "stop",
+        ],
+        "approve_endpoint_exists": False,
+        "execute_endpoint_exists": False,
+        "self_approval_permitted": False,
+        "external_actions_executed": 0,
     }
 
 
