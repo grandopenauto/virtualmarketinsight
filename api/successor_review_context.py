@@ -5,6 +5,7 @@ from typing import Any
 
 from api.lineage_guard import assert_review_record_current
 from api.review_ledger import ledger_path
+from api.successor_reviews import list_successor_reviews
 
 
 def _connect() -> sqlite3.Connection:
@@ -36,16 +37,15 @@ def build_successor_review_context(record_id: str) -> dict[str, Any]:
                 "external_actions_executed": 0,
             }
         item = dict(refresh)
-        existing = conn.execute(
-            """
-            SELECT successor_id,refresh_id,parent_record_id,record_id,generation,
-                   created_at,state,successor_receipt_sha256,sequence
-            FROM successor_review_records
-            WHERE refresh_id = ?
-            LIMIT 1
-            """,
-            (item["refresh_id"],),
-        ).fetchone()
+
+    existing = next(
+        (
+            successor
+            for successor in list_successor_reviews(100)
+            if str(successor.get("refresh_id") or "") == str(item["refresh_id"])
+        ),
+        None,
+    )
 
     if item.get("state") != "refreshed_for_human_review":
         return {
@@ -61,7 +61,7 @@ def build_successor_review_context(record_id: str) -> dict[str, Any]:
             "schema": "vmi.successor-review-context.v1",
             "record_id": record_id,
             "refresh": item,
-            "existing_successor": dict(existing),
+            "existing_successor": existing,
             "ready": False,
             "reason": "decision_refresh_already_has_successor_review",
             "external_actions_executed": 0,
