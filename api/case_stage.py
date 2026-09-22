@@ -38,11 +38,12 @@ def build_case_stage(record_id: str) -> dict[str, Any]:
     action = _latest(actions)
     action_ids = {str(x.get("action_packet_id")) for x in actions}
 
-    authorizations = [x for x in artifacts.get("authorizations", []) if str(x.get("action_packet_id")) in action_ids]
+    authorizations = [x for x in artifacts.get("human_authorizations", []) if str(x.get("action_packet_id")) in action_ids]
     authorization = _latest(authorizations)
     manifests = [x for x in artifacts.get("execution_reviews", []) if str(x.get("action_packet_id")) in action_ids]
     manifest = _latest(manifests)
-    execution_auths = [x for x in artifacts.get("execution_authorizations", []) if str(x.get("action_packet_id")) in action_ids]
+    manifest_ids = {str(x.get("manifest_id")) for x in manifests}
+    execution_auths = [x for x in artifacts.get("execution_authorizations", []) if str(x.get("manifest_id")) in manifest_ids]
     execution_auth = _latest(execution_auths)
     tickets = [x for x in artifacts.get("dispatch_tickets", []) if str(x.get("action_packet_id")) in action_ids]
     ticket = _latest(tickets)
@@ -58,12 +59,19 @@ def build_case_stage(record_id: str) -> dict[str, Any]:
         None,
     )
 
+    final_authorization_valid = bool(execution_auth and execution_auth.get("decision") == "authorize_read_only_execution")
+    if final_authorization_valid and execution_auth and execution_auth.get("expires_at"):
+        try:
+            final_authorization_valid = datetime.now(timezone.utc) < datetime.fromisoformat(str(execution_auth["expires_at"]))
+        except ValueError:
+            final_authorization_valid = False
+
     exists = [
         bool(event),
         bool(action),
         bool(authorization and authorization.get("decision") == "approve_for_execution_review"),
         bool(manifest),
-        bool(execution_auth and execution_auth.get("decision") == "authorize_read_only_execution"),
+        final_authorization_valid,
         bool(ticket),
         bool(execution and execution.get("status") == "completed"),
         bool(evidence_return),
@@ -78,6 +86,8 @@ def build_case_stage(record_id: str) -> dict[str, Any]:
         blocking_reason = f"human_authorization_{authorization.get('decision')}"
     elif execution_auth and execution_auth.get("decision") in {"request_changes", "hold", "reject"}:
         blocking_reason = f"final_authorization_{execution_auth.get('decision')}"
+    elif execution_auth and execution_auth.get("decision") == "authorize_read_only_execution" and not final_authorization_valid:
+        blocking_reason = "final_authorization_expired"
     elif ticket:
         try:
             if datetime.now(timezone.utc) >= datetime.fromisoformat(str(ticket.get("expires_at"))):
