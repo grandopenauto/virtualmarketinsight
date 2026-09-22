@@ -1,0 +1,15 @@
+from __future__ import annotations
+
+from api.operator_console_controls import CONSOLE_HTML_V24
+
+READINESS_SCRIPT = r"""
+<style>
+.cap-panel{margin-top:14px;background:#fff;border:1px solid #dce9f8;border-radius:18px;padding:18px;box-shadow:0 12px 34px rgba(11,47,97,.05)}.cap-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.cap{border:1px solid #e2edf8;border-radius:12px;padding:12px;background:#fbfdff}.cap .row{display:flex;justify-content:space-between;gap:8px;align-items:center}.pill{font-size:11px;font-weight:900;border-radius:999px;padding:4px 8px;background:#edf5ff;color:#1769e0}.pill.live{background:#eaf8f0;color:#147a46}.pill.off{background:#fff3e6;color:#9a5a00}.cap small{color:#63758d;display:block;margin-top:5px}.cap-refresh{border:1px solid #cfe0f4;background:#fff;color:#1769e0;border-radius:9px;padding:8px 10px;font-weight:800;cursor:pointer}
+</style>
+<script>
+async function loadCapabilityReadiness(){const view=document.getElementById('view');if(!view)return;let panel=document.getElementById('capability-readiness');if(!panel){panel=document.createElement('section');panel.id='capability-readiness';panel.className='cap-panel';const timeline=view.querySelector('.timeline');if(timeline)view.insertBefore(panel,timeline);else view.appendChild(panel)}panel.innerHTML='<h3>Capability Readiness</h3><div class="muted">Checking protected internal health…</div>';try{const r=await fetch('/operator/api/capabilities',{credentials:'same-origin'});if(r.status===401){location.href='/operator/login';return}if(!r.ok)throw new Error('readiness unavailable');const d=await r.json();const cards=d.items.map(x=>{const cls=x.healthy===true?'live':(x.reachable===false||x.integration_state==='configured-offline'?'off':'');const status=x.healthy===true?'healthy':(x.reachable===true?'reachable':(x.reachable===false?'offline':(x.integration_state||'unknown')));return `<div class="cap"><div class="row"><strong>${esc(x.label||x.id)}</strong><span class="pill ${cls}">${esc(status)}</span></div><small>${esc(x.integration_state||'')}</small><small>${esc(x.authority||'')}</small>${x.latency_ms!=null?`<small>${esc(x.latency_ms)} ms</small>`:''}</div>`}).join('');panel.innerHTML=`<div class="row" style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><h3 style="margin:0">Capability Readiness</h3><div class="muted">${esc(d.summary.healthy)} healthy · ${esc(d.summary.reachable)} reachable · ${esc(d.summary.configured_offline)} configured offline</div></div><button class="cap-refresh" id="cap-refresh">Refresh</button></div><div class="cap-grid" style="margin-top:12px">${cards}</div>`;panel.querySelector('#cap-refresh').onclick=loadCapabilityReadiness}catch(e){panel.innerHTML='<h3>Capability Readiness</h3><div class="muted">Readiness check unavailable.</div>'}}
+const _v24LoadCase=loadCase;loadCase=async function(id){await _v24LoadCase(id);await loadCapabilityReadiness()};setTimeout(()=>{if(selected)loadCapabilityReadiness()},800);
+</script>
+"""
+
+CONSOLE_HTML_V25 = CONSOLE_HTML_V24.replace("</body>", READINESS_SCRIPT + "</body>")
