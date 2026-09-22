@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 import api.app as base
 from api.approval_envelope import ApprovalEnvelopeInput, build_approval_envelope
+from api.authorizations import AuthorizationInput, append_authorization, list_authorizations, verify_authorization_chain
 from api.bounded_actions import (
     BoundedActionInput,
     get_bounded_action,
@@ -21,7 +22,7 @@ from api.decision_packet import build_decision_packet
 from api.review_events import ReviewEventInput, append_review_event, list_review_events, verify_event_chain
 from api.review_ledger import append_record, get_record, list_records, verify_chain
 
-base.VERSION = "0.10.0"
+base.VERSION = "0.11.0"
 app = base.app
 
 BA_READ_PROXY_URL = os.getenv(
@@ -190,7 +191,7 @@ app.router.routes[:] = [
 
 
 @app.post("/api/v1/operator/brief")
-def operator_brief_v10(request: base.EvidenceRequest, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+def operator_brief_v11(request: base.EvidenceRequest, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return _build_operator_brief(request)
 
@@ -204,12 +205,7 @@ def operator_decision_packet_v1(request: base.EvidenceRequest, x_vmi_operator_ke
 @app.get("/api/v1/operator/decision-packet/schema")
 def operator_decision_packet_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
-    return {
-        "schema": "vmi.decision-packet.v1",
-        "purpose": "Package routed intent, evidence, capability readiness, gaps and approval gates for human review.",
-        "external_execution_permitted": False,
-        "external_actions_executed": 0,
-    }
+    return {"schema": "vmi.decision-packet.v1", "external_execution_permitted": False, "external_actions_executed": 0}
 
 
 @app.post("/api/v1/operator/approval-envelope/prepare")
@@ -221,15 +217,7 @@ def operator_prepare_approval_envelope(request: ApprovalEnvelopeRequest, x_vmi_o
 @app.get("/api/v1/operator/approval-envelope/schema")
 def operator_approval_envelope_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
-    return {
-        "schema": "vmi.approval-envelope.v1",
-        "purpose": "Prepare a bounded human-approval request without recording approval or executing anything.",
-        "review_actions": ["request_more_evidence", "resolve_capability_gap", "prepare_bounded_action", "stop"],
-        "approve_endpoint_exists": False,
-        "execute_endpoint_exists": False,
-        "self_approval_permitted": False,
-        "external_actions_executed": 0,
-    }
+    return {"schema": "vmi.approval-envelope.v1", "review_actions": ["request_more_evidence", "resolve_capability_gap", "prepare_bounded_action", "stop"], "approve_endpoint_exists": False, "execute_endpoint_exists": False, "self_approval_permitted": False, "external_actions_executed": 0}
 
 
 @app.post("/api/v1/operator/review-ledger/prepare")
@@ -254,34 +242,13 @@ def operator_review_ledger_verify(x_vmi_operator_key: str | None = base.Header(d
 @app.get("/api/v1/operator/review-ledger/schema")
 def operator_review_ledger_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
-    return {
-        "schema": "vmi.review-ledger.v1",
-        "append_only": True,
-        "receipt_hash": "sha256",
-        "approve_endpoint_exists": False,
-        "execute_endpoint_exists": False,
-        "update_endpoint_exists": False,
-        "delete_endpoint_exists": False,
-        "self_approval_permitted": False,
-        "external_actions_executed": 0,
-    }
+    return {"schema": "vmi.review-ledger.v1", "append_only": True, "receipt_hash": "sha256", "approve_endpoint_exists": False, "execute_endpoint_exists": False, "update_endpoint_exists": False, "delete_endpoint_exists": False, "self_approval_permitted": False, "external_actions_executed": 0}
 
 
 @app.get("/api/v1/operator/review-events/schema")
 def operator_review_events_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
-    return {
-        "schema": "vmi.review-event.v1",
-        "decisions": ["request_more_evidence", "resolve_capability_gap", "prepare_bounded_action", "stop"],
-        "append_only": True,
-        "approval_recorded_by_event": False,
-        "execution_permitted_by_event": False,
-        "approve_endpoint_exists": False,
-        "execute_endpoint_exists": False,
-        "update_endpoint_exists": False,
-        "delete_endpoint_exists": False,
-        "external_actions_executed": 0,
-    }
+    return {"schema": "vmi.review-event.v1", "decisions": ["request_more_evidence", "resolve_capability_gap", "prepare_bounded_action", "stop"], "append_only": True, "approval_recorded_by_event": False, "execution_permitted_by_event": False, "approve_endpoint_exists": False, "execute_endpoint_exists": False, "update_endpoint_exists": False, "delete_endpoint_exists": False, "external_actions_executed": 0}
 
 
 @app.get("/api/v1/operator/review-events/verify")
@@ -297,15 +264,7 @@ def operator_append_review_event(record_id: str, event: ReviewEventInput, x_vmi_
         receipt = append_review_event(record_id, event)
     except KeyError:
         raise base.HTTPException(status_code=404, detail="Review record not found.")
-    return {
-        "schema": "vmi.review-event-receipt.v1",
-        "event": receipt,
-        "state": "review_recorded_no_authority",
-        "approval_recorded": False,
-        "execution_permitted": False,
-        "external_actions_executed": 0,
-        "next_gate": receipt["next_gate"],
-    }
+    return {"schema": "vmi.review-event-receipt.v1", "event": receipt, "state": "review_recorded_no_authority", "approval_recorded": False, "execution_permitted": False, "external_actions_executed": 0, "next_gate": receipt["next_gate"]}
 
 
 @app.get("/api/v1/operator/review-ledger/{record_id}/events")
@@ -321,19 +280,7 @@ def operator_list_review_events(record_id: str, limit: int = 50, x_vmi_operator_
 @app.get("/api/v1/operator/bounded-actions/schema")
 def operator_bounded_actions_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
-    return {
-        "schema": "vmi.bounded-action-packet.v1",
-        "action_kinds": ["research_only", "evidence_refresh", "capability_gap_resolution", "internal_analysis_preparation"],
-        "state": "prepared_not_approved",
-        "append_only": True,
-        "approval_recorded_by_packet": False,
-        "execution_permitted_by_packet": False,
-        "approve_endpoint_exists": False,
-        "execute_endpoint_exists": False,
-        "update_endpoint_exists": False,
-        "delete_endpoint_exists": False,
-        "external_actions_executed": 0,
-    }
+    return {"schema": "vmi.bounded-action-packet.v1", "action_kinds": ["research_only", "evidence_refresh", "capability_gap_resolution", "internal_analysis_preparation"], "state": "prepared_not_approved", "append_only": True, "approval_recorded_by_packet": False, "execution_permitted_by_packet": False, "approve_endpoint_exists": False, "execute_endpoint_exists": False, "update_endpoint_exists": False, "delete_endpoint_exists": False, "external_actions_executed": 0}
 
 
 @app.post("/api/v1/operator/review-events/{event_id}/bounded-action/prepare")
@@ -345,15 +292,7 @@ def operator_prepare_bounded_action(event_id: str, request: BoundedActionInput, 
         raise base.HTTPException(status_code=404, detail="Review event or record not found.")
     except ValueError as exc:
         raise base.HTTPException(status_code=409, detail=str(exc))
-    return {
-        "schema": "vmi.bounded-action-receipt.v1",
-        "packet": packet,
-        "state": "prepared_not_approved",
-        "approval_recorded": False,
-        "execution_permitted": False,
-        "external_actions_executed": 0,
-        "next_gate": packet["next_gate"],
-    }
+    return {"schema": "vmi.bounded-action-receipt.v1", "packet": packet, "state": "prepared_not_approved", "approval_recorded": False, "execution_permitted": False, "external_actions_executed": 0, "next_gate": packet["next_gate"]}
 
 
 @app.get("/api/v1/operator/bounded-actions")
@@ -367,6 +306,61 @@ def operator_bounded_actions_list(limit: int = 50, x_vmi_operator_key: str | Non
 def operator_bounded_actions_verify(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return verify_bounded_action_chain()
+
+
+@app.get("/api/v1/operator/authorizations/schema")
+def operator_authorizations_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return {
+        "schema": "vmi.authorization-record.v1",
+        "decisions": ["approve_for_execution_review", "request_changes", "hold", "reject"],
+        "append_only": True,
+        "approval_scope": "execution_review_only",
+        "execution_permitted_by_authorization": False,
+        "dispatch_permitted_by_authorization": False,
+        "execute_endpoint_exists": False,
+        "dispatch_endpoint_exists": False,
+        "update_endpoint_exists": False,
+        "delete_endpoint_exists": False,
+        "external_actions_executed": 0,
+    }
+
+
+@app.post("/api/v1/operator/bounded-actions/{action_packet_id}/authorizations")
+def operator_append_authorization(action_packet_id: str, request: AuthorizationInput, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    try:
+        receipt = append_authorization(action_packet_id, request)
+    except KeyError:
+        raise base.HTTPException(status_code=404, detail="Bounded action packet not found.")
+    except ValueError as exc:
+        raise base.HTTPException(status_code=409, detail=str(exc))
+    return {
+        "schema": "vmi.authorization-receipt.v1",
+        "authorization": receipt,
+        "approval_recorded": receipt["approval_recorded"],
+        "approval_scope": receipt["approval_scope"],
+        "execution_permitted": False,
+        "dispatch_permitted": False,
+        "external_actions_executed": 0,
+        "next_gate": receipt["next_gate"],
+    }
+
+
+@app.get("/api/v1/operator/bounded-actions/{action_packet_id}/authorizations")
+def operator_list_authorizations(action_packet_id: str, limit: int = 50, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    try:
+        items = list_authorizations(action_packet_id, limit)
+    except KeyError:
+        raise base.HTTPException(status_code=404, detail="Bounded action packet not found.")
+    return {"schema": "vmi.authorization-record.v1", "action_packet_id": action_packet_id, "items": items, "count": len(items), "execution_authority": False, "dispatch_authority": False, "external_actions_executed": 0}
+
+
+@app.get("/api/v1/operator/authorizations/verify")
+def operator_authorizations_verify(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return verify_authorization_chain()
 
 
 @app.get("/api/v1/operator/bounded-actions/{action_packet_id}")
@@ -396,10 +390,7 @@ def operator_native_read_plan(x_vmi_operator_key: str | None = base.Header(defau
         "configured": bool(sidecar.get("ok")),
         "transport": "loopback-only sidecar",
         "authority": "read-only",
-        "surfaces": {
-            surface: [{"agent_id": agent_id, "surface": read_surface} for agent_id, read_surface in pairs]
-            for surface, pairs in BA_READ_PLAN.items()
-        },
+        "surfaces": {surface: [{"agent_id": agent_id, "surface": read_surface} for agent_id, read_surface in pairs] for surface, pairs in BA_READ_PLAN.items()},
         "arbitrary_paths_allowed": False,
         "analysis_allowed": False,
         "execution_allowed": False,
