@@ -10,14 +10,18 @@ from urllib.request import Request, urlopen
 
 import api.app as base
 from api.approval_envelope import ApprovalEnvelopeInput, build_approval_envelope
+from api.bounded_actions import (
+    BoundedActionInput,
+    get_bounded_action,
+    list_bounded_actions,
+    prepare_bounded_action,
+    verify_bounded_action_chain,
+)
 from api.decision_packet import build_decision_packet
 from api.review_events import ReviewEventInput, append_review_event, list_review_events, verify_event_chain
 from api.review_ledger import append_record, get_record, list_records, verify_chain
 
-# Runtime augmentation of the proven gateway. Keeping this layer small makes
-# read adapters, decision packets, approval preparation, review persistence and
-# human review events independently reversible.
-base.VERSION = "0.9.0"
+base.VERSION = "0.10.0"
 app = base.app
 
 BA_READ_PROXY_URL = os.getenv(
@@ -25,14 +29,8 @@ BA_READ_PROXY_URL = os.getenv(
 ).rstrip("/")
 
 BA_READ_PLAN: dict[str, list[tuple[str, str]]] = {
-    "markets": [
-        ("seoagent", "operations"),
-        ("entrepreneuragent", "core_overview"),
-    ],
-    "analyst": [
-        ("accountingagent", "entities"),
-        ("entrepreneuragent", "core_overview"),
-    ],
+    "markets": [("seoagent", "operations"), ("entrepreneuragent", "core_overview")],
+    "analyst": [("accountingagent", "entities"), ("entrepreneuragent", "core_overview")],
     "opportunities": [
         ("leadwizard", "contractors"),
         ("leadwizard", "company_profiles"),
@@ -88,12 +86,7 @@ def _sidecar_health() -> dict[str, Any]:
 def _ba_read(agent_id: str, surface: str) -> dict[str, Any]:
     allowed = {(agent, name) for pairs in BA_READ_PLAN.values() for agent, name in pairs}
     if (agent_id, surface) not in allowed:
-        return {
-            "agent_id": agent_id,
-            "surface": surface,
-            "ok": False,
-            "error": "surface_not_allowed",
-        }
+        return {"agent_id": agent_id, "surface": surface, "ok": False, "error": "surface_not_allowed"}
 
     path = "/read/" + quote(agent_id, safe="") + "/" + quote(surface, safe="")
     req = Request(
@@ -113,20 +106,9 @@ def _ba_read(agent_id: str, surface: str) -> dict[str, Any]:
                 "data": base._compact(payload),
             }
     except HTTPError as exc:
-        return {
-            "agent_id": agent_id,
-            "surface": surface,
-            "ok": False,
-            "status": exc.code,
-            "error": "upstream_http_error",
-        }
+        return {"agent_id": agent_id, "surface": surface, "ok": False, "status": exc.code, "error": "upstream_http_error"}
     except (URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return {
-            "agent_id": agent_id,
-            "surface": surface,
-            "ok": False,
-            "error": type(exc).__name__,
-        }
+        return {"agent_id": agent_id, "surface": surface, "ok": False, "error": type(exc).__name__}
 
 
 def _ba_reads_for_surface(surface: str) -> list[dict[str, Any]]:
@@ -137,16 +119,12 @@ def _build_operator_brief(request: base.EvidenceRequest) -> dict[str, Any]:
     route, oie_evidence = base._operator_evidence(request)
     native_reads = _ba_reads_for_surface(route["resolved_surface"])
     sidecar = _sidecar_health()
-
     return {
         "request_id": route["request_id"],
         "route": route,
         "capability_health": base._capability_health(),
         "evidence": {
-            "opportunity_intelligence": {
-                "authority": "read-only",
-                "items": oie_evidence,
-            },
+            "opportunity_intelligence": {"authority": "read-only", "items": oie_evidence},
             "business_analyst_native": {
                 "authority": "loopback-only read adapter",
                 "configured": bool(sidecar.get("ok")),
@@ -161,13 +139,11 @@ def _build_operator_brief(request: base.EvidenceRequest) -> dict[str, Any]:
 
 
 def _build_decision_packet(request: base.EvidenceRequest) -> dict[str, Any]:
-    brief = _build_operator_brief(request)
-    return build_decision_packet(request, brief)
+    return build_decision_packet(request, _build_operator_brief(request))
 
 
 def _build_approval_envelope(request: ApprovalEnvelopeRequest) -> dict[str, Any]:
-    packet = _build_decision_packet(request)
-    return build_approval_envelope(packet, request.approval)
+    return build_approval_envelope(_build_decision_packet(request), request.approval)
 
 
 def _build_review_record(request: ApprovalEnvelopeRequest) -> dict[str, Any]:
@@ -208,82 +184,47 @@ def _build_review_record(request: ApprovalEnvelopeRequest) -> dict[str, Any]:
 
 
 app.router.routes[:] = [
-    route
-    for route in app.router.routes
-    if not (
-        getattr(route, "path", None) == "/api/v1/operator/brief"
-        and "POST" in getattr(route, "methods", set())
-    )
+    route for route in app.router.routes
+    if not (getattr(route, "path", None) == "/api/v1/operator/brief" and "POST" in getattr(route, "methods", set()))
 ]
 
 
 @app.post("/api/v1/operator/brief")
-def operator_brief_v09(
-    request: base.EvidenceRequest,
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_brief_v10(request: base.EvidenceRequest, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return _build_operator_brief(request)
 
 
 @app.post("/api/v1/operator/decision-packet")
-def operator_decision_packet_v1(
-    request: base.EvidenceRequest,
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_decision_packet_v1(request: base.EvidenceRequest, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return _build_decision_packet(request)
 
 
 @app.get("/api/v1/operator/decision-packet/schema")
-def operator_decision_packet_schema(
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_decision_packet_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return {
         "schema": "vmi.decision-packet.v1",
         "purpose": "Package routed intent, evidence, capability readiness, gaps and approval gates for human review.",
         "external_execution_permitted": False,
         "external_actions_executed": 0,
-        "required_sections": [
-            "intent",
-            "execution_graph",
-            "capability_plan",
-            "capability_health",
-            "evidence",
-            "evidence_summary",
-            "gaps",
-            "authority",
-            "approval_gates",
-            "review_options",
-            "next_gate",
-        ],
     }
 
 
 @app.post("/api/v1/operator/approval-envelope/prepare")
-def operator_prepare_approval_envelope(
-    request: ApprovalEnvelopeRequest,
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_prepare_approval_envelope(request: ApprovalEnvelopeRequest, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return _build_approval_envelope(request)
 
 
 @app.get("/api/v1/operator/approval-envelope/schema")
-def operator_approval_envelope_schema(
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_approval_envelope_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return {
         "schema": "vmi.approval-envelope.v1",
-        "purpose": "Prepare a bounded human-approval request from a Decision Packet without recording approval or executing anything.",
-        "review_actions": [
-            "request_more_evidence",
-            "resolve_capability_gap",
-            "prepare_bounded_action",
-            "stop",
-        ],
+        "purpose": "Prepare a bounded human-approval request without recording approval or executing anything.",
+        "review_actions": ["request_more_evidence", "resolve_capability_gap", "prepare_bounded_action", "stop"],
         "approve_endpoint_exists": False,
         "execute_endpoint_exists": False,
         "self_approval_permitted": False,
@@ -292,47 +233,29 @@ def operator_approval_envelope_schema(
 
 
 @app.post("/api/v1/operator/review-ledger/prepare")
-def operator_prepare_review_record(
-    request: ApprovalEnvelopeRequest,
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_prepare_review_record(request: ApprovalEnvelopeRequest, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return _build_review_record(request)
 
 
 @app.get("/api/v1/operator/review-ledger")
-def operator_review_ledger_list(
-    limit: int = 20,
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_review_ledger_list(limit: int = 20, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     items = list_records(limit)
-    return {
-        "schema": "vmi.review-ledger.v1",
-        "items": items,
-        "count": len(items),
-        "approval_authority": False,
-        "execution_authority": False,
-        "external_actions_executed": 0,
-    }
+    return {"schema": "vmi.review-ledger.v1", "items": items, "count": len(items), "approval_authority": False, "execution_authority": False, "external_actions_executed": 0}
 
 
 @app.get("/api/v1/operator/review-ledger/verify")
-def operator_review_ledger_verify(
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_review_ledger_verify(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return verify_chain()
 
 
 @app.get("/api/v1/operator/review-ledger/schema")
-def operator_review_ledger_schema(
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_review_ledger_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return {
         "schema": "vmi.review-ledger.v1",
-        "purpose": "Durably record prepared decision-review artifacts and cryptographic receipts without conferring approval or execution authority.",
         "append_only": True,
         "receipt_hash": "sha256",
         "approve_endpoint_exists": False,
@@ -345,19 +268,11 @@ def operator_review_ledger_schema(
 
 
 @app.get("/api/v1/operator/review-events/schema")
-def operator_review_events_schema(
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_review_events_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return {
         "schema": "vmi.review-event.v1",
-        "purpose": "Record an immutable human review direction linked to a prepared review record without conferring approval or execution authority.",
-        "decisions": [
-            "request_more_evidence",
-            "resolve_capability_gap",
-            "prepare_bounded_action",
-            "stop",
-        ],
+        "decisions": ["request_more_evidence", "resolve_capability_gap", "prepare_bounded_action", "stop"],
         "append_only": True,
         "approval_recorded_by_event": False,
         "execution_permitted_by_event": False,
@@ -370,19 +285,13 @@ def operator_review_events_schema(
 
 
 @app.get("/api/v1/operator/review-events/verify")
-def operator_review_events_verify(
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_review_events_verify(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     return verify_event_chain()
 
 
 @app.post("/api/v1/operator/review-ledger/{record_id}/events")
-def operator_append_review_event(
-    record_id: str,
-    event: ReviewEventInput,
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_append_review_event(record_id: str, event: ReviewEventInput, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     try:
         receipt = append_review_event(record_id, event)
@@ -400,49 +309,86 @@ def operator_append_review_event(
 
 
 @app.get("/api/v1/operator/review-ledger/{record_id}/events")
-def operator_list_review_events(
-    record_id: str,
-    limit: int = 50,
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_list_review_events(record_id: str, limit: int = 50, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     try:
         items = list_review_events(record_id, limit)
     except KeyError:
         raise base.HTTPException(status_code=404, detail="Review record not found.")
+    return {"schema": "vmi.review-event.v1", "record_id": record_id, "items": items, "count": len(items), "approval_authority": False, "execution_authority": False, "external_actions_executed": 0}
+
+
+@app.get("/api/v1/operator/bounded-actions/schema")
+def operator_bounded_actions_schema(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
     return {
-        "schema": "vmi.review-event.v1",
-        "record_id": record_id,
-        "items": items,
-        "count": len(items),
-        "approval_authority": False,
-        "execution_authority": False,
+        "schema": "vmi.bounded-action-packet.v1",
+        "action_kinds": ["research_only", "evidence_refresh", "capability_gap_resolution", "internal_analysis_preparation"],
+        "state": "prepared_not_approved",
+        "append_only": True,
+        "approval_recorded_by_packet": False,
+        "execution_permitted_by_packet": False,
+        "approve_endpoint_exists": False,
+        "execute_endpoint_exists": False,
+        "update_endpoint_exists": False,
+        "delete_endpoint_exists": False,
         "external_actions_executed": 0,
     }
 
 
+@app.post("/api/v1/operator/review-events/{event_id}/bounded-action/prepare")
+def operator_prepare_bounded_action(event_id: str, request: BoundedActionInput, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    try:
+        packet = prepare_bounded_action(event_id, request)
+    except KeyError:
+        raise base.HTTPException(status_code=404, detail="Review event or record not found.")
+    except ValueError as exc:
+        raise base.HTTPException(status_code=409, detail=str(exc))
+    return {
+        "schema": "vmi.bounded-action-receipt.v1",
+        "packet": packet,
+        "state": "prepared_not_approved",
+        "approval_recorded": False,
+        "execution_permitted": False,
+        "external_actions_executed": 0,
+        "next_gate": packet["next_gate"],
+    }
+
+
+@app.get("/api/v1/operator/bounded-actions")
+def operator_bounded_actions_list(limit: int = 50, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    items = list_bounded_actions(limit)
+    return {"schema": "vmi.bounded-action-packet.v1", "items": items, "count": len(items), "approval_authority": False, "execution_authority": False, "external_actions_executed": 0}
+
+
+@app.get("/api/v1/operator/bounded-actions/verify")
+def operator_bounded_actions_verify(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return verify_bounded_action_chain()
+
+
+@app.get("/api/v1/operator/bounded-actions/{action_packet_id}")
+def operator_bounded_action_get(action_packet_id: str, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    item = get_bounded_action(action_packet_id, include_payload=True)
+    if not item:
+        raise base.HTTPException(status_code=404, detail="Bounded action packet not found.")
+    return {"schema": "vmi.bounded-action-packet.v1", "item": item, "approval_authority": False, "execution_authority": False, "external_actions_executed": 0}
+
+
 @app.get("/api/v1/operator/review-ledger/{record_id}")
-def operator_review_ledger_get(
-    record_id: str,
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_review_ledger_get(record_id: str, x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     item = get_record(record_id, include_payload=True)
     if not item:
         raise base.HTTPException(status_code=404, detail="Review record not found.")
-    return {
-        "schema": "vmi.review-ledger.v1",
-        "item": item,
-        "approval_authority": False,
-        "execution_authority": False,
-        "external_actions_executed": 0,
-    }
+    return {"schema": "vmi.review-ledger.v1", "item": item, "approval_authority": False, "execution_authority": False, "external_actions_executed": 0}
 
 
 @app.get("/api/v1/operator/native/read-plan")
-def operator_native_read_plan(
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
+def operator_native_read_plan(x_vmi_operator_key: str | None = base.Header(default=None)) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
     sidecar = _sidecar_health()
     return {
@@ -451,10 +397,7 @@ def operator_native_read_plan(
         "transport": "loopback-only sidecar",
         "authority": "read-only",
         "surfaces": {
-            surface: [
-                {"agent_id": agent_id, "surface": read_surface}
-                for agent_id, read_surface in pairs
-            ]
+            surface: [{"agent_id": agent_id, "surface": read_surface} for agent_id, read_surface in pairs]
             for surface, pairs in BA_READ_PLAN.items()
         },
         "arbitrary_paths_allowed": False,
