@@ -28,6 +28,19 @@ def _record_has_successor(conn: sqlite3.Connection, record_id: str) -> bool:
     return False
 
 
+def assert_review_record_current(record_id: str) -> dict[str, Any]:
+    with _connect() as conn:
+        record = conn.execute(
+            "SELECT record_id, record_type, state, sequence FROM review_records WHERE record_id = ? LIMIT 1",
+            (record_id,),
+        ).fetchone()
+        if not record:
+            raise KeyError("review_record_not_found")
+        if _record_has_successor(conn, record_id):
+            raise ValueError("review_record_superseded_by_successor_cycle")
+        return dict(record)
+
+
 def assert_review_event_current(event_id: str) -> dict[str, Any]:
     with _connect() as conn:
         event = conn.execute(
