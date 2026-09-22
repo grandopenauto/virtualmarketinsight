@@ -26,7 +26,7 @@ CONTRACT_REGISTRY: dict[str, dict[str, Any]] = {
         "contract_id": "oie.read-research.v1",
         "transport": "internal adapter registry",
         "allowed_action_kinds": {"research_only", "evidence_refresh"},
-        "operations": ["opportunities", "demand_status", "demand_matches"],
+        "operations": ["opportunities", "demand_status", "matches"],
         "effect_class": "read_only_internal",
     },
     "business analyst": {
