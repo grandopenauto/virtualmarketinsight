@@ -11,10 +11,12 @@ from urllib.request import Request, urlopen
 import api.app as base
 from api.approval_envelope import ApprovalEnvelopeInput, build_approval_envelope
 from api.decision_packet import build_decision_packet
+from api.review_ledger import append_record, get_record, list_records, verify_chain
 
 # Runtime augmentation of the proven gateway. Keeping this layer small makes
-# read adapters, decision packets and approval preparation independently reversible.
-base.VERSION = "0.7.0"
+# read adapters, decision packets, approval preparation and review persistence
+# independently reversible.
+base.VERSION = "0.8.0"
 app = base.app
 
 BA_READ_PROXY_URL = os.getenv(
@@ -167,6 +169,43 @@ def _build_approval_envelope(request: ApprovalEnvelopeRequest) -> dict[str, Any]
     return build_approval_envelope(packet, request.approval)
 
 
+def _build_review_record(request: ApprovalEnvelopeRequest) -> dict[str, Any]:
+    packet = _build_decision_packet(request)
+    envelope = build_approval_envelope(packet, request.approval)
+    payload = {
+        "schema": "vmi.review-record.v1",
+        "state": "prepared_not_approved",
+        "request_id": packet.get("request_id"),
+        "packet_id": packet.get("packet_id"),
+        "approval_id": envelope.get("approval_id"),
+        "decision_packet": packet,
+        "approval_envelope": envelope,
+        "authority": {
+            "approval_recorded": False,
+            "self_approval_permitted": False,
+            "execution_permitted": False,
+            "analysis_generation_permitted": False,
+            "capital_movement_permitted": False,
+            "trading_permitted": False,
+            "outreach_permitted": False,
+            "external_actions_executed": 0,
+        },
+    }
+    receipt = append_record("review_record", payload)
+    return {
+        "schema": "vmi.review-record-receipt.v1",
+        "record": receipt,
+        "decision_context": envelope.get("decision_context", {}),
+        "requested_review_action": envelope.get("requested_review_action"),
+        "readiness": envelope.get("readiness"),
+        "state": "prepared_not_approved",
+        "next_gate": "Human review only. Persisting this record does not approve or execute anything.",
+        "approval_recorded": False,
+        "execution_permitted": False,
+        "external_actions_executed": 0,
+    }
+
+
 app.router.routes[:] = [
     route
     for route in app.router.routes
@@ -178,7 +217,7 @@ app.router.routes[:] = [
 
 
 @app.post("/api/v1/operator/brief")
-def operator_brief_v07(
+def operator_brief_v08(
     request: base.EvidenceRequest,
     x_vmi_operator_key: str | None = base.Header(default=None),
 ) -> dict[str, Any]:
@@ -247,6 +286,77 @@ def operator_approval_envelope_schema(
         "approve_endpoint_exists": False,
         "execute_endpoint_exists": False,
         "self_approval_permitted": False,
+        "external_actions_executed": 0,
+    }
+
+
+@app.post("/api/v1/operator/review-ledger/prepare")
+def operator_prepare_review_record(
+    request: ApprovalEnvelopeRequest,
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return _build_review_record(request)
+
+
+@app.get("/api/v1/operator/review-ledger")
+def operator_review_ledger_list(
+    limit: int = 20,
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    items = list_records(limit)
+    return {
+        "schema": "vmi.review-ledger.v1",
+        "items": items,
+        "count": len(items),
+        "approval_authority": False,
+        "execution_authority": False,
+        "external_actions_executed": 0,
+    }
+
+
+@app.get("/api/v1/operator/review-ledger/verify")
+def operator_review_ledger_verify(
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return verify_chain()
+
+
+@app.get("/api/v1/operator/review-ledger/schema")
+def operator_review_ledger_schema(
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return {
+        "schema": "vmi.review-ledger.v1",
+        "purpose": "Durably record prepared decision-review artifacts and cryptographic receipts without conferring approval or execution authority.",
+        "append_only": True,
+        "receipt_hash": "sha256",
+        "approve_endpoint_exists": False,
+        "execute_endpoint_exists": False,
+        "update_endpoint_exists": False,
+        "delete_endpoint_exists": False,
+        "self_approval_permitted": False,
+        "external_actions_executed": 0,
+    }
+
+
+@app.get("/api/v1/operator/review-ledger/{record_id}")
+def operator_review_ledger_get(
+    record_id: str,
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    item = get_record(record_id, include_payload=True)
+    if not item:
+        raise base.HTTPException(status_code=404, detail="Review record not found.")
+    return {
+        "schema": "vmi.review-ledger.v1",
+        "item": item,
+        "approval_authority": False,
+        "execution_authority": False,
         "external_actions_executed": 0,
     }
 
