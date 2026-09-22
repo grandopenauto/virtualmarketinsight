@@ -153,6 +153,21 @@ def _next_gate(decision: str) -> str:
     }[decision]
 
 
+def get_review_event(event_id: str, include_payload: bool = True) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM review_events WHERE event_id = ? LIMIT 1", (event_id,)
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    if include_payload:
+        item["payload"] = json.loads(item.pop("payload_json"))
+    else:
+        item.pop("payload_json", None)
+    return item
+
+
 def list_review_events(record_id: str, limit: int = 50) -> list[dict[str, Any]]:
     if not get_record(record_id, include_payload=False):
         raise KeyError("review_record_not_found")
