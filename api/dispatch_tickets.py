@@ -24,7 +24,7 @@ class DispatchTicketInput(BaseModel):
 
 
 DISPATCHABLE_CONTRACTS = {
-    "oie.read-research.v1": {"opportunities", "demand_status", "demand_matches"},
+    "oie.read-research.v1": {"opportunities", "demand_status", "matches"},
 }
 
 
