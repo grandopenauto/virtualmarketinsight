@@ -1,0 +1,15 @@
+from __future__ import annotations
+
+from api.operator_console_dispatch_ticket import CONSOLE_HTML_V37
+
+RUNNER_PREVIEW_SCRIPT = r"""
+<style>
+.runner-preview{margin-top:14px;background:#fff;border:1px solid #dce9f8;border-radius:18px;padding:18px;box-shadow:0 12px 34px rgba(11,47,97,.05)}.runner-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.runner-cell{border:1px solid #e2edf8;border-radius:12px;padding:12px;background:#fbfdff}.runner-cell small{display:block;color:#63758d}.runner-cell strong{display:block;margin-top:4px}.runner-warn{padding:12px;border:1px solid #f2dfb8;background:#fff8ea;border-radius:10px;color:#7c4b00}.runner-ok{padding:12px;border:1px solid #cfe7d8;background:#f2fbf5;border-radius:10px;color:#147a46}
+</style>
+<script>
+async function loadRunnerPreview(recordId){const view=document.getElementById('view');if(!view||!recordId)return;let box=document.getElementById('runner-preview');if(!box){box=document.createElement('section');box.id='runner-preview';box.className='runner-preview';const timeline=view.querySelector('.timeline');if(timeline)view.insertBefore(box,timeline);else view.appendChild(box)}box.innerHTML='<h3>Read-Only Runner Preview</h3><div class="muted">Checking newest ticket and one-time claim state…</div>';try{const r=await fetch('/operator/api/cases/'+encodeURIComponent(recordId)+'/runner-context',{credentials:'same-origin'});if(r.status===401){location.href='/operator/login';return}if(!r.ok){const x=await r.json().catch(()=>({}));throw new Error(x.detail||'runner preview unavailable')}const d=await r.json();if(!d.ready){box.innerHTML=`<h3>Read-Only Runner Preview</h3><div class="runner-warn">Not ready: ${esc((d.reason||'not ready').replaceAll('_',' '))}</div>`;return}const p=d.dispatch_plan;const limit=(p.parameters||{}).limit;box.innerHTML=`<h3>Read-Only Runner Preview</h3><div class="runner-ok">This is the final preflight. No run button is exposed in this version.</div><div class="runner-grid"><div class="runner-cell"><small>Capability</small><strong>${esc(p.capability_id)}</strong></div><div class="runner-cell"><small>Operation</small><strong>${esc(p.operation)}</strong></div><div class="runner-cell"><small>Result limit</small><strong>${esc(limit)}</strong></div><div class="runner-cell"><small>Ticket remaining</small><strong>${esc(d.ticket_remaining_seconds)} sec</strong></div></div><div class="runner-cell" style="margin-top:10px"><small>Purpose</small><strong>${esc(p.purpose||'Not specified')}</strong></div><p class="muted">Single-use: yes · claim-before-call: yes · external writes: no · capital movement: no · trading: no · outreach: no. ${esc(d.next_gate)}</p>`}catch(err){box.innerHTML=`<h3>Read-Only Runner Preview</h3><div class="muted">${esc(err.message||'Preview unavailable.')}</div>`}}
+const _v37LoadCase=loadCase;loadCase=async function(id){await _v37LoadCase(id);await loadRunnerPreview(id)};setTimeout(()=>{if(selected)loadRunnerPreview(selected)},1700);
+</script>
+"""
+
+CONSOLE_HTML_V38 = CONSOLE_HTML_V37.replace("</body>", RUNNER_PREVIEW_SCRIPT + "</body>")
