@@ -15,11 +15,13 @@ import api.app as base
 base.VERSION = "0.5.0"
 app = base.app
 
-BA_READ_KEY = os.getenv("VMI_BA_READ_KEY", "")
-BA_BASE_URL = os.getenv("VMI_BUSINESS_ANALYST_URL", "http://127.0.0.1:3194").rstrip("/")
+BA_READ_PROXY_URL = os.getenv(
+    "VMI_BA_READ_PROXY_URL", "http://127.0.0.1:3193"
+).rstrip("/")
 
 # VMI callers never supply an arbitrary Business Analyst path. These exact named
-# surfaces are already allow-listed by Business Analyst's native adapter layer.
+# surfaces are already allow-listed by the loopback sidecar and Business Analyst's
+# native adapter layer.
 BA_READ_PLAN: dict[str, list[tuple[str, str]]] = {
     "markets": [
         ("seoagent", "operations"),
@@ -46,12 +48,37 @@ BA_READ_PLAN: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
-# Promote the registry only in this runtime. No internal URL or credential is
-# included in the public metadata.
 for item in base.CAPABILITY_REGISTRY:
     if item.get("id") == "business-analyst":
         item["integration_state"] = "read-adapter-live"
-        item["authority"] = "dedicated read-only native adapter"
+        item["authority"] = "loopback-only read adapter"
+
+# Add the sidecar to the operator health mesh. Its address remains private because
+# HEALTH_TARGETS is never returned by the public capability registry.
+if not any(item.get("id") == "business-analyst-vmi-read" for item in base.HEALTH_TARGETS):
+    base.HEALTH_TARGETS.append(
+        {
+            "id": "business-analyst-vmi-read",
+            "label": "Business Analyst VMI Read Sidecar",
+            "base": BA_READ_PROXY_URL,
+            "path": "/health",
+        }
+    )
+
+
+def _sidecar_health() -> dict[str, Any]:
+    req = Request(
+        BA_READ_PROXY_URL + "/health",
+        headers={"Accept": "application/json", "User-Agent": f"VMI-Gateway/{base.VERSION}"},
+    )
+    try:
+        with urlopen(req, timeout=3) as response:
+            payload = json.loads(response.read(128_000).decode("utf-8"))
+            return {"ok": bool(payload.get("ok")), "status": response.status, "data": payload}
+    except HTTPError as exc:
+        return {"ok": False, "status": exc.code, "error": "upstream_http_error"}
+    except (URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return {"ok": False, "error": type(exc).__name__}
 
 
 def _ba_read(agent_id: str, surface: str) -> dict[str, Any]:
@@ -63,36 +90,20 @@ def _ba_read(agent_id: str, surface: str) -> dict[str, Any]:
             "ok": False,
             "error": "surface_not_allowed",
         }
-    if not BA_READ_KEY:
-        return {
-            "agent_id": agent_id,
-            "surface": surface,
-            "ok": False,
-            "error": "adapter_not_configured",
-        }
 
-    path = (
-        "/api/business-analyst/native/"
-        + quote(agent_id, safe="")
-        + "/read/"
-        + quote(surface, safe="")
-    )
+    path = "/read/" + quote(agent_id, safe="") + "/" + quote(surface, safe="")
     req = Request(
-        BA_BASE_URL + path,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": f"VMI-Gateway/{base.VERSION}",
-            "x-vmi-read-key": BA_READ_KEY,
-        },
+        BA_READ_PROXY_URL + path,
+        headers={"Accept": "application/json", "User-Agent": f"VMI-Gateway/{base.VERSION}"},
     )
     try:
-        with urlopen(req, timeout=5) as response:
+        with urlopen(req, timeout=6) as response:
             raw = response.read(512_000)
             payload = json.loads(raw.decode("utf-8"))
             return {
                 "agent_id": agent_id,
                 "surface": surface,
-                "ok": bool(payload.get("success", response.status == 200)),
+                "ok": bool(payload.get("success", payload.get("ok", response.status == 200))),
                 "status": response.status,
                 "adapter_status": payload.get("status"),
                 "data": base._compact(payload),
@@ -137,6 +148,7 @@ def operator_brief_v05(
     base._require_operator_key(x_vmi_operator_key)
     route, oie_evidence = base._operator_evidence(request)
     native_reads = _ba_reads_for_surface(route["resolved_surface"])
+    sidecar = _sidecar_health()
 
     return {
         "request_id": route["request_id"],
@@ -148,8 +160,8 @@ def operator_brief_v05(
                 "items": oie_evidence,
             },
             "business_analyst_native": {
-                "authority": "dedicated read-only native adapter",
-                "configured": bool(BA_READ_KEY),
+                "authority": "loopback-only read adapter",
+                "configured": bool(sidecar.get("ok")),
                 "items": native_reads,
             },
         },
@@ -165,9 +177,11 @@ def operator_native_read_plan(
     x_vmi_operator_key: str | None = base.Header(default=None),
 ) -> dict[str, Any]:
     base._require_operator_key(x_vmi_operator_key)
+    sidecar = _sidecar_health()
     return {
         "adapter": "business-analyst-native",
-        "configured": bool(BA_READ_KEY),
+        "configured": bool(sidecar.get("ok")),
+        "transport": "loopback-only sidecar",
         "authority": "read-only",
         "surfaces": {
             surface: [
