@@ -129,23 +129,14 @@ def _ba_reads_for_surface(surface: str) -> list[dict[str, Any]]:
     return [_ba_read(agent, name) for agent, name in BA_READ_PLAN.get(surface, [])]
 
 
-# Replace the v0.4 operator brief while leaving every other route unchanged.
-app.router.routes[:] = [
-    route
-    for route in app.router.routes
-    if not (
-        getattr(route, "path", None) == "/api/v1/operator/brief"
-        and "POST" in getattr(route, "methods", set())
-    )
-]
+def _build_operator_brief(request: base.EvidenceRequest) -> dict[str, Any]:
+    """Build the operator packet after authorization has already been decided.
 
-
-@app.post("/api/v1/operator/brief")
-def operator_brief_v05(
-    request: base.EvidenceRequest,
-    x_vmi_operator_key: str | None = base.Header(default=None),
-) -> dict[str, Any]:
-    base._require_operator_key(x_vmi_operator_key)
+    Keeping packet construction separate from HTTP authentication lets deployment
+    tests exercise routing/evidence behavior without importing service-only secrets
+    into a standalone process. Public callers still go through operator_brief_v05,
+    which performs the operator-key gate first.
+    """
     route, oie_evidence = base._operator_evidence(request)
     native_reads = _ba_reads_for_surface(route["resolved_surface"])
     sidecar = _sidecar_health()
@@ -170,6 +161,26 @@ def operator_brief_v05(
         "execution_state": "operator_brief_only",
         "next_gate": "Human review before any external, analysis-generation, or execution action.",
     }
+
+
+# Replace the v0.4 operator brief while leaving every other route unchanged.
+app.router.routes[:] = [
+    route
+    for route in app.router.routes
+    if not (
+        getattr(route, "path", None) == "/api/v1/operator/brief"
+        and "POST" in getattr(route, "methods", set())
+    )
+]
+
+
+@app.post("/api/v1/operator/brief")
+def operator_brief_v05(
+    request: base.EvidenceRequest,
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return _build_operator_brief(request)
 
 
 @app.get("/api/v1/operator/native/read-plan")
