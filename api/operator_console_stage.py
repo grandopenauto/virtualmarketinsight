@@ -1,0 +1,15 @@
+from __future__ import annotations
+
+from api.operator_console_successor_review import CONSOLE_HTML_V42
+
+STAGE_SCRIPT = r"""
+<style>
+.stage-panel{margin:0 0 18px;background:#fff;border:1px solid #dce9f8;border-radius:18px;padding:18px;box-shadow:0 12px 34px rgba(11,47,97,.05)}.stage-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:12px}.stage-track{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.stage-chip{border:1px solid #e2edf8;border-radius:11px;padding:10px;background:#f8fbff;font-size:12px}.stage-chip strong{display:block;margin-bottom:4px}.stage-chip.complete{border-color:#cfe7d8;background:#f2fbf5}.stage-chip.current{border-color:#78adf2;background:#edf5ff;box-shadow:0 0 0 2px rgba(23,105,224,.08)}.stage-chip.locked{opacity:.58}.stage-state{font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.06em}.stage-chip.complete .stage-state{color:#147a46}.stage-chip.current .stage-state{color:#1769e0}.stage-block{margin-top:10px;font-size:13px;color:#9a5a00}@media(max-width:900px){.stage-track{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.stage-track{grid-template-columns:1fr}}
+</style>
+<script>
+async function loadCaseStage(recordId){const view=document.getElementById('view');if(!view||!recordId)return;let box=document.getElementById('case-stage-panel');if(!box){box=document.createElement('section');box.id='case-stage-panel';box.className='stage-panel';const cards=view.querySelector('.cards');if(cards)view.insertBefore(box,cards);else view.prepend(box)}box.innerHTML='<h3>Governed Case Stage</h3><div class="muted">Resolving current lineage state…</div>';try{const r=await fetch('/operator/api/cases/'+encodeURIComponent(recordId)+'/stage',{credentials:'same-origin'});if(r.status===401){location.href='/operator/login';return}if(!r.ok){const x=await r.json().catch(()=>({}));throw new Error(x.detail||'stage unavailable')}const d=await r.json();const chips=(d.stages||[]).map((x,i)=>`<div class="stage-chip ${esc(x.state)}"><strong>${i+1}. ${esc(x.label)}</strong><span class="stage-state">${esc(x.state)}</span></div>`).join('');const current=d.current_stage?d.current_stage.label:(d.cycle_complete?'Cycle complete':'No current stage');box.innerHTML=`<div class="stage-head"><div><h3 style="margin:0">Governed Case Stage</h3><div class="muted">Current: ${esc(current)} · automatic advancement: no</div></div><span class="tag">${esc(d.generation_count)} generation${Number(d.generation_count)===1?'':'s'}</span></div><div class="stage-track">${chips}</div>${d.blocking_reason?`<div class="stage-block">Attention: ${esc(d.blocking_reason.replaceAll('_',' '))}</div>`:''}` }catch(err){box.innerHTML=`<h3>Governed Case Stage</h3><div class="muted">${esc(err.message||'Stage unavailable.')}</div>`}}
+const _v42LoadCase=loadCase;loadCase=async function(id){await _v42LoadCase(id);await loadCaseStage(id)};setTimeout(()=>{if(selected)loadCaseStage(selected)},350);
+</script>
+"""
+
+CONSOLE_HTML_V43 = CONSOLE_HTML_V42.replace("</body>", STAGE_SCRIPT + "</body>")
