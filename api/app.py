@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import json
 import os
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Literal
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 ENV = os.getenv("VMI_ENV", "development")
+OPERATOR_KEY = os.getenv("VMI_OPERATOR_KEY", "")
+OIE_BASE_URL = os.getenv("VMI_OIE_URL", "http://127.0.0.1:3197").rstrip("/")
 
 app = FastAPI(
     title="VirtualMarketInsight Gateway",
@@ -31,7 +38,7 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["content-type"],
+    allow_headers=["content-type", "x-vmi-operator-key"],
 )
 
 SurfaceId = Literal[
@@ -160,10 +167,88 @@ ROUTES: dict[str, dict[str, Any]] = {
 
 PRIORITY = ["analyst", "markets", "opportunities", "operational-capital", "agents"]
 
+# Public-safe metadata only. Internal addresses and credentials are never returned.
+CAPABILITY_REGISTRY: list[dict[str, Any]] = [
+    {
+        "id": "opportunity-intelligence",
+        "label": "Opportunity Intelligence Engine",
+        "surfaces": ["markets", "analyst", "opportunities", "operational-capital"],
+        "integration_state": "read-adapter-live",
+        "authority": "read-only evidence",
+    },
+    {
+        "id": "business-analyst",
+        "label": "Business Analyst",
+        "surfaces": ["analyst", "opportunities", "operational-capital"],
+        "integration_state": "contract-review",
+        "authority": "read-only candidate",
+    },
+    {
+        "id": "linkstream",
+        "label": "LinkStream",
+        "surfaces": ["markets", "analyst", "agents"],
+        "integration_state": "contract-review",
+        "authority": "read-only candidate",
+    },
+    {
+        "id": "opportunity-explorer",
+        "label": "Opportunity Explorer",
+        "surfaces": ["opportunities"],
+        "integration_state": "contract-review",
+        "authority": "read-only candidate",
+    },
+    {
+        "id": "shebavonova",
+        "label": "Shebavonova",
+        "surfaces": ["operational-capital", "agents"],
+        "integration_state": "configured-offline",
+        "authority": "execution requires approval",
+    },
+    {
+        "id": "commodity-clarity",
+        "label": "Commodity Clarity",
+        "surfaces": ["markets", "analyst"],
+        "integration_state": "configured-offline",
+        "authority": "read-only candidate",
+    },
+    {
+        "id": "agent-for-sell",
+        "label": "AgentForSell",
+        "surfaces": ["agents"],
+        "integration_state": "configured-offline",
+        "authority": "marketplace candidate",
+    },
+]
+
+OIE_OPERATIONS: dict[str, dict[str, Any]] = {
+    "demand_status": {"path": "/api/demand/status", "limit": False},
+    "signals": {"path": "/api/demand/signals", "limit": True},
+    "matches": {"path": "/api/demand/matches", "limit": True},
+    "acquisition": {"path": "/api/demand/acquisition", "limit": True},
+    "international_markets": {"path": "/api/international/markets", "limit": True},
+    "capabilities": {"path": "/api/demand/capabilities", "limit": False},
+    "opportunities": {"path": "/api/opportunities", "limit": True},
+    "partners": {"path": "/api/partners", "limit": True},
+    "integration_status": {"path": "/api/integrations/status", "limit": False},
+    "ontologies": {"path": "/api/ontologies", "limit": False},
+}
+
+SURFACE_EVIDENCE_PLAN: dict[str, list[str]] = {
+    "markets": ["demand_status", "signals", "international_markets"],
+    "analyst": ["demand_status", "signals", "ontologies"],
+    "opportunities": ["demand_status", "matches", "opportunities"],
+    "operational-capital": ["demand_status", "capabilities", "opportunities"],
+    "agents": ["integration_status", "capabilities"],
+}
+
 
 class RouteRequest(BaseModel):
     query: str = Field(min_length=3, max_length=2000)
     starting_surface: SurfaceId | None = None
+
+
+class EvidenceRequest(RouteRequest):
+    limit: int = Field(default=10, ge=1, le=25)
 
 
 def _resolve_route(request: RouteRequest) -> dict[str, Any]:
@@ -220,12 +305,62 @@ def _resolve_route(request: RouteRequest) -> dict[str, Any]:
     }
 
 
+def _require_operator_key(provided: str | None) -> None:
+    if not OPERATOR_KEY:
+        raise HTTPException(status_code=503, detail="Operator evidence access is not configured.")
+    if not provided or not secrets.compare_digest(provided, OPERATOR_KEY):
+        raise HTTPException(status_code=401, detail="Operator authorization required.")
+
+
+def _compact(value: Any, depth: int = 0) -> Any:
+    if depth >= 5:
+        return "[depth-limited]"
+    if isinstance(value, dict):
+        return {str(k): _compact(v, depth + 1) for k, v in list(value.items())[:40]}
+    if isinstance(value, list):
+        return [_compact(v, depth + 1) for v in value[:10]]
+    if isinstance(value, str) and len(value) > 1200:
+        return value[:1200] + "…"
+    return value
+
+
+def _oie_get(operation: str, limit: int) -> dict[str, Any]:
+    spec = OIE_OPERATIONS.get(operation)
+    if not spec:
+        return {"operation": operation, "ok": False, "error": "operation_not_allowed"}
+
+    params: dict[str, Any] = {}
+    if spec["limit"]:
+        params["limit"] = min(max(limit, 1), 25)
+
+    url = f"{OIE_BASE_URL}{spec['path']}"
+    if params:
+        url += "?" + urlencode(params)
+
+    req = Request(url, headers={"Accept": "application/json", "User-Agent": "VMI-Gateway/0.3"})
+    try:
+        with urlopen(req, timeout=4) as response:
+            raw = response.read(512_000)
+            payload = json.loads(raw.decode("utf-8"))
+            return {
+                "operation": operation,
+                "ok": True,
+                "status": response.status,
+                "data": _compact(payload),
+            }
+    except HTTPError as exc:
+        return {"operation": operation, "ok": False, "status": exc.code, "error": "upstream_http_error"}
+    except (URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return {"operation": operation, "ok": False, "error": type(exc).__name__}
+
+
 @app.get("/")
 def root() -> dict[str, Any]:
     return {
         "service": "virtualmarketinsight-gateway",
         "version": VERSION,
         "routing": "live",
+        "evidence_adapters": "gated",
         "execution": "gated",
     }
 
@@ -244,6 +379,16 @@ def health() -> dict[str, Any]:
 @app.get("/api/v1/surfaces")
 def surfaces() -> dict[str, Any]:
     return {"items": SURFACES, "count": len(SURFACES)}
+
+
+@app.get("/api/v1/capabilities")
+def capabilities() -> dict[str, Any]:
+    return {
+        "items": CAPABILITY_REGISTRY,
+        "count": len(CAPABILITY_REGISTRY),
+        "internal_addresses_exposed": False,
+        "execution": "gated",
+    }
 
 
 @app.get("/api/v1/router/capabilities")
@@ -266,6 +411,28 @@ def router_capabilities() -> dict[str, Any]:
 @app.post("/api/v1/router/resolve")
 def resolve_router(request: RouteRequest) -> dict[str, Any]:
     return _resolve_route(request)
+
+
+@app.post("/api/v1/operator/evidence/preview")
+def operator_evidence_preview(
+    request: EvidenceRequest,
+    x_vmi_operator_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_operator_key(x_vmi_operator_key)
+    route = _resolve_route(request)
+    operations = SURFACE_EVIDENCE_PLAN[route["resolved_surface"]]
+    evidence = [_oie_get(operation, request.limit) for operation in operations]
+    return {
+        "request_id": route["request_id"],
+        "resolved_surface": route["resolved_surface"],
+        "graph_path": route["graph_path"],
+        "adapter": "opportunity-intelligence",
+        "adapter_authority": "read-only",
+        "evidence": evidence,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "external_actions_executed": 0,
+        "execution_state": "evidence_gathering_only",
+    }
 
 
 @app.get("/api/v1/graph/sample")
