@@ -11,12 +11,13 @@ from urllib.request import Request, urlopen
 import api.app as base
 from api.approval_envelope import ApprovalEnvelopeInput, build_approval_envelope
 from api.decision_packet import build_decision_packet
+from api.review_events import ReviewEventInput, append_review_event, list_review_events, verify_event_chain
 from api.review_ledger import append_record, get_record, list_records, verify_chain
 
 # Runtime augmentation of the proven gateway. Keeping this layer small makes
-# read adapters, decision packets, approval preparation and review persistence
-# independently reversible.
-base.VERSION = "0.8.0"
+# read adapters, decision packets, approval preparation, review persistence and
+# human review events independently reversible.
+base.VERSION = "0.9.0"
 app = base.app
 
 BA_READ_PROXY_URL = os.getenv(
@@ -217,7 +218,7 @@ app.router.routes[:] = [
 
 
 @app.post("/api/v1/operator/brief")
-def operator_brief_v08(
+def operator_brief_v09(
     request: base.EvidenceRequest,
     x_vmi_operator_key: str | None = base.Header(default=None),
 ) -> dict[str, Any]:
@@ -339,6 +340,83 @@ def operator_review_ledger_schema(
         "update_endpoint_exists": False,
         "delete_endpoint_exists": False,
         "self_approval_permitted": False,
+        "external_actions_executed": 0,
+    }
+
+
+@app.get("/api/v1/operator/review-events/schema")
+def operator_review_events_schema(
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return {
+        "schema": "vmi.review-event.v1",
+        "purpose": "Record an immutable human review direction linked to a prepared review record without conferring approval or execution authority.",
+        "decisions": [
+            "request_more_evidence",
+            "resolve_capability_gap",
+            "prepare_bounded_action",
+            "stop",
+        ],
+        "append_only": True,
+        "approval_recorded_by_event": False,
+        "execution_permitted_by_event": False,
+        "approve_endpoint_exists": False,
+        "execute_endpoint_exists": False,
+        "update_endpoint_exists": False,
+        "delete_endpoint_exists": False,
+        "external_actions_executed": 0,
+    }
+
+
+@app.get("/api/v1/operator/review-events/verify")
+def operator_review_events_verify(
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    return verify_event_chain()
+
+
+@app.post("/api/v1/operator/review-ledger/{record_id}/events")
+def operator_append_review_event(
+    record_id: str,
+    event: ReviewEventInput,
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    try:
+        receipt = append_review_event(record_id, event)
+    except KeyError:
+        raise base.HTTPException(status_code=404, detail="Review record not found.")
+    return {
+        "schema": "vmi.review-event-receipt.v1",
+        "event": receipt,
+        "state": "review_recorded_no_authority",
+        "approval_recorded": False,
+        "execution_permitted": False,
+        "external_actions_executed": 0,
+        "next_gate": receipt["next_gate"],
+    }
+
+
+@app.get("/api/v1/operator/review-ledger/{record_id}/events")
+def operator_list_review_events(
+    record_id: str,
+    limit: int = 50,
+    x_vmi_operator_key: str | None = base.Header(default=None),
+) -> dict[str, Any]:
+    base._require_operator_key(x_vmi_operator_key)
+    try:
+        items = list_review_events(record_id, limit)
+    except KeyError:
+        raise base.HTTPException(status_code=404, detail="Review record not found.")
+    return {
+        "schema": "vmi.review-event.v1",
+        "record_id": record_id,
+        "items": items,
+        "count": len(items),
+        "approval_authority": False,
+        "execution_authority": False,
         "external_actions_executed": 0,
     }
 
